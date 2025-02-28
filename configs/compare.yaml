@@ -1,0 +1,17 @@
+models: ["LightweightTS", "Crossformer", "PatchTST"]  # 待对比模型列表
+
+common_params:
+  input_dim: 15
+  num_classes: 3
+  epochs: 50
+  batch_size: 16
+
+model_specific_params:
+  LightweightTS:
+    d_model: 32
+  Crossformer:
+    d_model: 64
+    nhead: 4
+  PatchTST:
+    patch_len: 2
+    d_model: 32
