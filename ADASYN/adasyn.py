@@ -37,7 +37,7 @@ print("标签分布:", label_counts)
 print(f"少数类样本数量: {minority_count}")
 
 # 5. ADASYN过采样
-adasyn = ADASYN(sampling_strategy={2: 60}, n_neighbors=min(3, minority_count - 1))
+adasyn = ADASYN(sampling_strategy={1: 60}, n_neighbors=min(3, minority_count - 1)) #将类别标签为1的样本数量调整为60
 X_resampled_pca, y_resampled = adasyn.fit_resample(X_pca, labels)
 
 # 6. PCA逆变换重建特征
@@ -48,5 +48,5 @@ X_resampled = scaler.inverse_transform(X_resampled_scaled)  # 逆标准化
 X_resampled_3d = X_resampled.reshape(-1, n_rows, n_cols)  # 形状 (n_new_samples, 5, 15)
 
 # 8. 保存结果
-np.save("new_dataset.npy", X_resampled_3d)
-np.save("new_labels.npy", y_resampled)
+np.save("new_dataset2.npy", X_resampled_3d)
+np.save("new_labels2.npy", y_resampled)

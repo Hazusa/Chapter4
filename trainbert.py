@@ -12,73 +12,25 @@ from models.model import InformerLite,AutoformerTiny,LiteTST,TS_CNN,TS_LSTM,TS_B
 
 
 # 加载配置
-with open("configs/config_tst.yaml", encoding='utf-8') as f:
+with open("configs/config_bert.yaml", encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
 config["lr"] = float(config["lr"])
 # 初始化]
-'''model = LightweightTSClassifier(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"],
-    d_model=config["d_model"]
-)'''
 
-"""
-model = InformerLite(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"],
-    d_model=config["d_model"]
-)
-
-"""
-"""
-model = AutoformerTiny(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"],
-    d_model=config["d_model"]
-)
-
-"""
-
-model = LiteTST(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"],
-    d_model=config["d_model"]
-)
-
-
-"""
+'''
 model = TS_RoBERTa(
     input_dim=config["input_dim"],
     num_classes=config["num_classes"],
 )
-"""
 '''
+
 model = TS_BERT(
     input_dim=config["input_dim"],
     num_classes=config["num_classes"],
 )
-'''
-'''
-model = TS_CNN(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"]
-)
-'''
 
-''''
-model = TS_LSTM(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"]
-)
-'''
 
-'''
-model = TS_BiLSTM(
-    input_dim=config["input_dim"],
-    num_classes=config["num_classes"]
-)
-'''
 # 获取当前时间并格式化
 current_time = datetime.now().strftime("%Y%m%d%H%M%S")
 # 获取当前训练模型的名称
@@ -93,7 +45,7 @@ model_dir = './experiments/models'
 #optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
 optimizer = torch.optim.AdamW(model.parameters(),
                              lr=config["lr"],
-                             weight_decay=1e-3)  # 增加权重衰减
+                             weight_decay=0.001)  # 明确添加权重衰减
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode='max',
@@ -133,16 +85,21 @@ for epoch in range(config["epochs"]):
     train_loss = 0.0
     correct = 0
     total = 0
-    #
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+    # 添加参数初始化检查（仅第一次迭代时打印）
+    if epoch == 0:
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                print(f"Initialized {name} with mean {param.data.mean():.4f}, std {param.data.std():.4f}")
+
     for x, y in train_loader:
         optimizer.zero_grad()
         outputs = model(x)
         loss = criterion(outputs, y)
         loss.backward()
 
-        # 调整梯度裁剪阈值
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 从1.0改为5.0
+        # 添加梯度裁剪
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=4.0)
         optimizer.step()
 
         train_loss += loss.item()

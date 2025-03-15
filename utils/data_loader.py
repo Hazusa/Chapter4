@@ -15,13 +15,14 @@ class TSDataset(Dataset):
     def __getitem__(self, idx):
         x = self.data[idx]
         y = self.labels[idx]
-
+        '''
         if self.augment:
             # 数据增强：随机添加噪声
             if torch.rand(1) < 0.5:
                 x += torch.randn_like(x) * 0.01
         return x, y
-
+        '''
+        return x, y
 
 def get_loaders(data, labels, batch_size=16, split_ratio=0.8):
     indices = np.random.permutation(len(data))

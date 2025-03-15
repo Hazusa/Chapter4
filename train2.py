@@ -1,3 +1,6 @@
+import logging
+import os
+from datetime import datetime
 import numpy as np
 import yaml
 import torch
@@ -7,44 +10,119 @@ from utils.metrics import calculate_metrics
 from models.model import InformerLite,AutoformerTiny,LiteTST,TS_CNN,TS_LSTM,TS_BiLSTM,TS_BERT,TS_RoBERTa
 #from data.raw.trans import npy_data, labels
 
-with open("configs/config.yaml", encoding='utf-8') as f:
+
+# 加载配置
+with open("configs/config_lstm.yaml", encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
 config["lr"] = float(config["lr"])
+# 初始化]
+'''
+model = TS_RoBERTa(
+    input_dim=config["input_dim"],
+    num_classes=config["num_classes"],
+)
+'''
+'''
+model = TS_BERT(
+    input_dim=config["input_dim"],
+    num_classes=config["num_classes"],
+)
+'''
+'''
+model = TS_CNN(
+    input_dim=config["input_dim"],
+    num_classes=config["num_classes"]
+)
+'''
 
-def initialize_model():
-    # 初始化模型
-    model = AutoformerTiny(
-        input_dim=config["input_dim"],
-        num_classes=config["num_classes"],
-        d_model=config["d_model"]
-    )
-    return model
+
+"""model = TS_LSTM(
+    input_dim=config["input_dim"],
+    num_classes=config["num_classes"]
+)
+"""
+
+model = TS_BiLSTM(
+    input_dim=config["input_dim"],
+    num_classes=config["num_classes"]
+)
+
+# 获取当前时间并格式化
+current_time = datetime.now().strftime("%Y%m%d%H%M%S")
+# 获取当前训练模型的名称
+model_name = model.__class__.__name__
+# 配置日志记录
+log_filename = os.path.join('./experiments/logs', f"{current_time}_{model_name}.log")
+logging.basicConfig(filename=log_filename, level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+model_dir = './experiments/models'
+
+
+#optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
+optimizer = torch.optim.AdamW(model.parameters(),
+                             lr=config["lr"])  # 增加权重衰减
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='max',
+    patience=3,
+    factor=0.5,
+    min_lr=1e-6  # 添加最小学习率限制
+)
+criterion = torch.nn.CrossEntropyLoss()
+
 
 # 数据加载
-data = np.load('dataset.npy')
-labels = np.load('labels.npy')
+#data = np.load('dataset.npy')
+#labels = np.load('labels.npy')
+data = np.load('new_dataset2.npy')
+labels = np.load('new_labels2.npy')
+print("Data stats - min:", np.nanmin(data), "max:", np.nanmax(data), "mean:", np.nanmean(data))
+print("Labels unique values:", np.unique(labels))
+data = np.nan_to_num(data, nan=0.0, posinf=1e5, neginf=-1e5)  # 处理异常值
 
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler()
+data = scaler.fit_transform(data.reshape(-1, data.shape[-1])).reshape(data.shape)
+
+indices = np.arange(len(data))
+np.random.shuffle(indices)
+shuffled_data = data[indices]
+shuffled_labels = labels[indices]
+
+# 修改后的数据加载（保持原有loader获取方式）
+train_loader, val_loader = get_loaders(shuffled_data, shuffled_labels, batch_size=16, split_ratio=0.8)
+
+# 初始化最佳准确率
+best_acc = 0
 # 训练循环
-for _ in range(2):  # 假设进行两次训练
-    # 初始化模型和优化器
-    model = initialize_model()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
-    criterion = torch.nn.CrossEntropyLoss()
+for epoch in range(config["epochs"]):
+    model.train()
+    train_loss = 0.0
+    correct = 0
+    total = 0
+    #
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    for x, y in train_loader:
+        optimizer.zero_grad()
+        outputs = model(x)
+        loss = criterion(outputs, y)
+        loss.backward()
 
-    train_loader, val_loader = get_loaders(data, labels, batch_size=16, split_ratio=0.8)
+        # 调整梯度裁剪阈值
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 从1.0改为5.0
+        optimizer.step()
 
-    # 训练循环
-    for epoch in range(config["epochs"]):
-        model.train()
-        for x, y in train_loader:
-            optimizer.zero_grad()
-            outputs = model(x)
-            loss = criterion(outputs, y)
-            loss.backward()
-            optimizer.step()
+        train_loss += loss.item()
+        _, predicted = outputs.max(1)
+        total += y.size(0)
+        correct += predicted.eq(y).sum().item()
 
-        # 验证
+    train_acc = 100. * correct / total
+    print(f"Epoch {epoch}: Train Loss={train_loss / len(train_loader):.4f}, Train Acc={train_acc:.2f}%")
+
+# 验证
+    if epoch % 3 == 0:
         model.eval()
         with torch.no_grad():
             val_preds, val_labels = [], []
@@ -53,5 +131,12 @@ for _ in range(2):  # 假设进行两次训练
                 val_preds.extend(torch.argmax(outputs, 1).tolist())
                 val_labels.extend(y.tolist())
 
-        acc, f1 = calculate_metrics(val_labels, val_preds)
-        print(f"Epoch {epoch}: Val Acc={acc:.4f}, F1={f1:.4f}")
+        acc, precision, recall,f1= calculate_metrics(val_labels, val_preds,1)
+        print(f"Epoch {epoch}: Val Acc={acc:.4f}, Precision={precision:.4f}, Recall={recall:.4f}, F1={f1:.4f}")
+
+    if acc > best_acc and acc > 0.6:
+        best_acc = acc
+        model_filename = os.path.join(model_dir, f"{current_time}_{model_name}.pth")
+        torch.save(model.state_dict(), model_filename)
+        logging.info(f"Best model saved at epoch {epoch} with accuracy {best_acc:.4f}")
+    scheduler.step(acc)

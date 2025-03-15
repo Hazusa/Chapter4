@@ -145,6 +145,48 @@ class InformerLite(nn.Module):
 
 
 class AutoformerTiny(nn.Module):
+    def __init__(self, input_dim=15, num_classes=4, d_model=64, moving_avg=25):
+        super().__init__()
+        self.decomp = SeriesDecomposition(moving_avg)
+        self.embed = nn.Linear(input_dim, d_model)
+        self.pos_enc = PositionalEncoding(d_model)  # 新增位置编码
+        self.trend_proj = nn.Linear(input_dim, d_model)  # 新增趋势项投影
+
+        # 增强编码器
+        self.encoder = nn.Sequential(
+            *[nn.TransformerEncoderLayer(
+                d_model, 4,
+                dim_feedforward=128,
+                dropout=0.1  # 添加dropout
+            ) for _ in range(3)]  # 增加层数
+        )
+
+        # 增强分类头
+        self.classifier = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),  # 融合季节和趋势信息
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(d_model, num_classes)
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        seasonal, trend = self.decomp(x)
+
+        # 分别处理季节和趋势项
+        seasonal = self.embed(seasonal)
+        seasonal = self.pos_enc(seasonal)
+        trend_proj = self.trend_proj(trend)
+
+        # 通过编码器
+        enc_out = self.encoder(seasonal.permute(1, 0, 2))
+
+        # 信息融合
+        enc_out = enc_out.mean(dim=0)  # (B, d_model)
+        trend_feat = trend_proj.mean(dim=1)  # (B, d_model)
+
+        return self.classifier(torch.cat([enc_out, trend_feat], dim=1))
+"""
+class AutoformerTiny(nn.Module):
     def __init__(self, input_dim: 15, num_classes: 4, d_model=64, moving_avg=25):
         super().__init__()
         self.decomp = SeriesDecomposition(moving_avg)
@@ -162,6 +204,7 @@ class AutoformerTiny(nn.Module):
         x = x.mean(dim=0)  # (B, d_model)
         return self.classifier(x)
 
+"""
 
 class LiteTST(nn.Module):
     def __init__(self, input_dim: 15, num_classes: 4, d_model=64, num_heads=4):
@@ -181,16 +224,21 @@ class LiteTST(nn.Module):
         x = x.mean(dim=0)  # (B, d_model)
         return self.classifier(x)
 
+
+
+
+
+
 # =====================
 # CNN模型（1D卷积）
 # =====================
 class TS_CNN(nn.Module):
-    def __init__(self, input_dim=15, num_classes=3):
+    def __init__(self, input_dim=15, num_classes=4):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv1d(input_dim, 64, kernel_size=3, padding=1),  # 输入通道数=input_dim
             nn.ReLU(),
-            nn.MaxPool1d(2),
+            nn.MaxPool1d(2, stride=1),
             nn.Conv1d(64, 128, kernel_size=3),
             nn.ReLU(),
             nn.AdaptiveAvgPool1d(1)  # 全局池化
@@ -212,7 +260,7 @@ class TS_CNN(nn.Module):
 # LSTM模型
 # =====================
 class TS_LSTM(nn.Module):
-    def __init__(self, input_dim=15, num_classes=3, hidden_size=64):
+    def __init__(self, input_dim=15, num_classes=4, hidden_size=64):
         super().__init__()
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -232,7 +280,7 @@ class TS_LSTM(nn.Module):
 # 双向LSTM模型
 # =====================
 class TS_BiLSTM(nn.Module):
-    def __init__(self, input_dim=15, num_classes=3, hidden_size=64):
+    def __init__(self, input_dim=15, num_classes=4, hidden_size=64):
         super().__init__()
         self.bilstm = nn.LSTM(
             input_size=input_dim,
@@ -247,21 +295,76 @@ class TS_BiLSTM(nn.Module):
         output, (h_n, _) = self.bilstm(x)
         return self.classifier(output[:, -1, :])
 
-# =====================
+
+class TS_BERT(nn.Module):
+    def __init__(self, input_dim=15, num_classes=4, hidden_size=64):
+        super().__init__()
+        # 添加位置编码层
+        self.pos_encoder = PositionalEncoding(hidden_size)
+
+        # 修改embed初始化方式
+        self.embed = nn.Linear(input_dim, hidden_size)
+        nn.init.xavier_normal_(self.embed.weight)
+
+        # 增强编码器结构
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=4,
+            dim_feedforward=256,
+            batch_first=True,
+            dropout=0.1  # 添加dropout
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
+        self.encoder_norm = nn.LayerNorm(hidden_size)  # 添加层归一化
+
+        # 增强分类头
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Linear(hidden_size // 2, num_classes)
+        )
+
+        # 初始化CLS token
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        nn.init.normal_(self.cls_token, std=0.02)  # 缩小初始化范围
+        self.proj = nn.Linear(input_dim, hidden_size) if input_dim != hidden_size else nn.Identity()
+
+    def forward(self, x):
+        # 修改残差连接实现
+        identity = self.proj(x)  # 维度匹配投影
+        cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
+        x = self.embed(x) + identity  # 现在维度一致
+
+        x = torch.cat([cls_tokens, x], dim=1)
+        x = self.pos_encoder(x)  # 添加位置编码
+        x = x.permute(1, 0, 2)
+
+        # 通过编码器
+        x = self.encoder(x)
+        x = self.encoder_norm(x)  # 层归一化
+
+        # 使用所有token的加权平均
+        cls_output = x[0] + 0.5 * x.mean(dim=0)  # 结合全局信息
+        return self.classifier(cls_output)
+
+"""# =====================
 # 简化版BERT（适应时间序列）
 # =====================
 class TS_BERT(nn.Module):
-    def __init__(self, input_dim=15, num_classes=3, hidden_size=64):
+    def __init__(self, input_dim=15, num_classes=4, hidden_size=64):
         super().__init__()
         self.embed = nn.Linear(input_dim, hidden_size)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_size,
             nhead=4,
-            dim_feedforward=256
+            dim_feedforward=256,
+            batch_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
         self.cls_token = nn.Parameter(torch.randn(1, 1, hidden_size))  # 类似[CLS]标记
         self.classifier = nn.Linear(hidden_size, num_classes)
+
 
     def forward(self, x):
         # 添加可学习的[CLS]标记
@@ -274,11 +377,11 @@ class TS_BERT(nn.Module):
         return self.classifier(x[0])
 
         # =====================
-
+"""
 # 简化版RoBERTa（动态掩码）
 # =====================
-class TS_RoBERTa(TS_BERT):
-    def __init__(self, input_dim=15, num_classes=3, hidden_size=64):
+"""class TS_RoBERTa(TS_BERT):
+    def __init__(self, input_dim=15, num_classes=4, hidden_size=64):
         super().__init__(input_dim, num_classes, hidden_size)
         # 添加动态掩码机制
         self.mask_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
@@ -300,4 +403,47 @@ class TS_RoBERTa(TS_BERT):
         x = torch.cat([cls_tokens, x_embed], dim=1)
         x = x.permute(1, 0, 2)
         x = self.encoder(x)
-        return self.classifier(x[0])
+        return self.classifier(x[0])"""
+
+
+class TS_RoBERTa(TS_BERT):
+    def __init__(self, input_dim=15, num_classes=4, hidden_size=64):
+        super().__init__(input_dim, num_classes, hidden_size)
+        # 增强动态掩码机制
+        self.mask_embed = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        nn.init.normal_(self.mask_embed, std=0.02)  # 缩小初始化范围
+
+        # 添加掩码层归一化
+        self.mask_norm = nn.LayerNorm(hidden_size)
+
+        # 增强分类头（继承父类已修改）
+
+    def forward(self, x, mask_ratio=0.15):
+        # 生成随机掩码（保持原有逻辑）
+        B, T, _ = x.shape
+        num_mask = int(T * mask_ratio)
+        rand_indices = torch.rand(B, T).argsort(dim=1)
+        mask_pos = rand_indices[:, :num_mask]
+
+        # 使用父类的embed和残差连接
+        identity = self.proj(x)
+        x_embed = self.embed(x) + identity
+
+        # 应用动态掩码
+        mask_embed = self.mask_embed.expand(B, num_mask, -1)
+        x_embed.scatter_(1, mask_pos.unsqueeze(-1).expand(-1, -1, x_embed.size(-1)), mask_embed)
+        x_embed = self.mask_norm(x_embed)  # 添加层归一化
+
+        # 继承父类的后续处理
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls_tokens, x_embed], dim=1)
+        x = self.pos_encoder(x)
+        x = x.permute(1, 0, 2)
+        x = self.encoder(x)
+        x = self.encoder_norm(x)
+
+        # 使用改进后的分类方式
+        cls_output = x[0] + 0.5 * x.mean(dim=0)
+        return self.classifier(cls_output)
+
+
